@@ -1,0 +1,92 @@
+name: macOS Build (Signed + Notarized)
+
+on:
+  push:
+    branches:
+      - main
+
+  workflow_dispatch:
+
+
+jobs:
+  build:
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+    name: 🚧 macOS (Signed + Notarized)
+    steps:
+
+    - name: '🧰 Checkout'
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: 'Install Homebrew packages'
+      run: brew install ninja create-dmg fish
+
+    - name: Install Qt
+      uses: jurplel/install-qt-action@v3
+      with:
+        aqtversion: '==3.1.*'
+        version: '6.10'
+        host: 'mac'
+        target: 'desktop'
+        arch: 'clang_64'
+        modules: 'qtconnectivity qthttpserver qtimageformats qtmultimedia'
+        archives: 'qttranslations qttools qtsvg qtbase'
+
+    - name: '🔏 Setup Codesigning'
+      env:
+        BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
+        BUILD_ASC_API_KEY_BASE64: ${{ secrets.BUILD_ASC_API_KEY_BASE64 }}
+      run: |
+        CERTIFICATE_PATH=$RUNNER_TEMP/build_certificate.p12
+        ASC_API_KEY_PATH=$RUNNER_TEMP/asc_api_key.json
+
+        echo -n "$BUILD_CERTIFICATE_BASE64" | base64 --decode -o $CERTIFICATE_PATH
+        echo -n "$BUILD_ASC_API_KEY_BASE64" | base64 --decode -o $ASC_API_KEY_PATH
+
+    - name: '🚧 Build Cantata'
+      run: |
+        cmake -S. -G Ninja -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_OSX_ARCHITECTURES="x86_64;arm64"
+        cmake --build build
+
+    - name: '📦 Make Cantata app bundle'
+      run: |
+        cmake --install build --prefix bundle
+    
+    - name: '🔏 Sign app bundle'
+      uses: indygreg/apple-code-sign-action@v1.1
+      with:
+        input_path: bundle/Cantata.app
+        sign: true
+        notarize: true
+        staple: true
+        p12_file: ${{ runner.temp }}/build_certificate.p12
+        p12_password: ${{ secrets.P12_PASSWORD }}
+        app_store_connect_api_key_json_file: ${{ runner.temp }}/asc_api_key.json
+        sign_args: '--for-notarization'
+
+    - name: '📦 Package Cantata'
+      run: |
+        mkdir package
+        create-dmg --volname "Cantata" --volicon mac/cantata.icns --background mac/dmg/background.png --window-size 600 500 --icon-size 75 --icon "Cantata.app" -25 175 --hide-extension "Cantata.app" --app-drop-link 310 175 package/Cantata.dmg bundle
+
+    - name: '🔏 Sign DMG'
+      uses: indygreg/apple-code-sign-action@v1.1
+      with:
+        input_path: package/Cantata.dmg
+        sign: true
+        notarize: true
+        staple: true
+        p12_file: ${{ runner.temp }}/build_certificate.p12
+        p12_password: ${{ secrets.P12_PASSWORD }}
+        app_store_connect_api_key_json_file: ${{ runner.temp }}/asc_api_key.json
+        sign_args: '--for-notarization'
+
+    - name: '⏫ Upload Artifact'
+      uses: actions/upload-artifact@v4
+      with:
+        name: macos-dmg
+        path: package/*.dmg
+        if-no-files-found: error
